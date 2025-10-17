@@ -1,110 +1,89 @@
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse
-from mangum import Mangum
+"""
+Vercel Serverless Function for receiving exam tasks
+"""
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 import asyncio
 from datetime import datetime
 
-app = FastAPI()
-
 # Your secret from the Google Form
 YOUR_SECRET = os.environ.get("STUDENT_SECRET", "your-secret-here")
 
-# Store for background processing (in production, use a queue)
-pending_tasks = []
-
-@app.post("/api/receive-task")
-async def receive_task(request: Request):
+class handler(BaseHTTPRequestHandler):
     """
-    Main endpoint that receives task requests from instructors
+    Vercel serverless function handler
     """
-    try:
-        data = await request.json()
-        
-        # Validate required fields
-        required_fields = ["email", "secret", "task", "round", "nonce", "brief", "checks", "evaluation_url"]
-        for field in required_fields:
-            if field not in data:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Missing required field: {field}"}
-                )
-        
-        # Verify secret
-        if data["secret"] != YOUR_SECRET:
-            return JSONResponse(
-                status_code=403,
-                content={"error": "Invalid secret"}
-            )
-        
-        # Log the task
-        print(f"[{datetime.now()}] Received task: {data['task']} Round {data['round']}")
-        print(f"Brief: {data['brief']}")
-        
-        # Add to pending tasks (in production, use a proper queue/database)
-        pending_tasks.append(data)
-        
-        # Trigger background processing
-        # Note: Vercel functions have 10-60s timeout, so we need to handle this carefully
-        asyncio.create_task(process_task(data))
-        
-        # Return 200 immediately
-        return JSONResponse(
-            status_code=200,
-            content={"status": "accepted", "task": data["task"], "round": data["round"]}
-        )
-        
-    except json.JSONDecodeError:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid JSON"}
-        )
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
-
-async def process_task(task_data):
-    """
-    Background task processor
-    This should be called after returning 200 to the instructor
-    """
-    try:
-        # Import here to avoid loading heavy modules on every request
-        from builder import build_and_deploy
-        
-        print(f"Starting background processing for task: {task_data['task']}")
-        
-        # Build and deploy the app
-        result = await build_and_deploy(task_data)
-        
-        print(f"Task {task_data['task']} completed: {result}")
-        
-    except Exception as e:
-        print(f"Background processing error: {str(e)}")
-
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "pending_tasks": len(pending_tasks),
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Student API Endpoint - Ready to receive tasks",
-        "endpoints": {
-            "receive_task": "/api/receive-task",
-            "health": "/api/health"
-        }
-    }
-
-# Mangum handler for AWS Lambda/Vercel
-handler = Mangum(app)
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        if self.path == '/api/health' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {
+                "status": "healthy",
+                "timestamp": datetime.now().isoformat()
+            }
+            self.wfile.write(json.dumps(response).encode())
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {"message": "Student API Endpoint - Ready"}
+            self.wfile.write(json.dumps(response).encode())
+    
+    def do_POST(self):
+        """Handle POST requests"""
+        if self.path == '/api/receive-task' or self.path == '/receive-task':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+                
+                # Validate
+                required = ["email", "secret", "task", "round", "nonce", "brief", "checks", "evaluation_url"]
+                for field in required:
+                    if field not in data:
+                        self.send_response(400)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"error": f"Missing {field}"}).encode())
+                        return
+                
+                # Verify secret
+                if data["secret"] != YOUR_SECRET:
+                    self.send_response(403)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Invalid secret"}).encode())
+                    return
+                
+                print(f"✅ Task received: {data['task']} Round {data['round']}")
+                
+                # Send 200 immediately
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "accepted",
+                    "task": data["task"],
+                    "round": data["round"]
+                }).encode())
+                
+                # Process task
+                try:
+                    from builder import build_and_deploy
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    result = loop.run_until_complete(build_and_deploy(data))
+                    loop.close()
+                    print(f"✅ Task completed: {result}")
+                except Exception as e:
+                    print(f"❌ Processing error: {e}")
+                
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
