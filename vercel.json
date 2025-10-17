@@ -1,8 +1,7 @@
 {
-  "version": 2,
   "functions": {
-    "api/index.py": {
-      "maxDuration": 60
+    "api/*.py": {
+      "runtime": "python3.9"
     }
   }
 }
